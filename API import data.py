@@ -9,7 +9,7 @@ client = EntsoePandasClient(api_key=API_KEY)
 
 country = "FR"
 
-start = pd.Timestamp("2020-01-01", tz="Europe/Paris")
+start = pd.Timestamp("2020-01-01", tz="Europe/Paris"g
 end   = pd.Timestamp("2026-01-01", tz="Europe/Paris")
 print('start')
 prices_day_ahead = client.query_day_ahead_prices(

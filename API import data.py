@@ -3,13 +3,12 @@ from entsoe import EntsoePandasClient
 
 import os
 
-# Better: store your token as an environment variable
-API_KEY = "cd8ec880-a866-4d8f-9868-52f6695c24bd"
+API_KEY = os.getenv("ENTSOE_API_KEY")
 client = EntsoePandasClient(api_key=API_KEY)
 
 country = "FR"
 
-start = pd.Timestamp("2020-01-01", tz="Europe/Paris"g
+start = pd.Timestamp("2020-01-01", tz="Europe/Paris")
 end   = pd.Timestamp("2026-01-01", tz="Europe/Paris")
 print('start')
 prices_day_ahead = client.query_day_ahead_prices(

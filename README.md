@@ -20,6 +20,7 @@ as an econometric benchmark for day-ahead electricity price forecasting[4].
 The model produces the 24 hourly electricity prices for day `d` using
 information that is available before delivery.
 
+
 ### Input features
 
 The current implementation uses:

@@ -76,16 +76,7 @@ lear_data.index = pd.date_range(
 lear_data.index.name = "Date"
 np.random.seed(42)
 
-exogenous_cols = [
-    "Exogenous 1",
-    "Exogenous 2",
-    "Exogenous 3",
-    "Exogenous 4",
-    "Exogenous 5"
-
-]
-
-for col in exogenous_cols:
+for col in ["Exogenous 3",  "Exogenous 5"]:
     lear_data[col] = (
         lear_data[col].astype(float)
         + np.random.normal(
@@ -94,6 +85,7 @@ for col in exogenous_cols:
             size=len(lear_data)
         )
     )
+
 
 lear_data.to_csv(
     os.path.join(path_datasets_folder, "France.csv"),

@@ -118,6 +118,13 @@ load = client.query_load(country, start=start, end=end)
 load.to_csv(
     "FR_load.csv"
 )
+
+# Download unavailability of the nuclear
+outages = (client.
+           query_unavailability_of_generation_units(country_code="FR",
+                                                    start=start,
+                                                    end=end))
+outages.to_csv("FR_outages_new.csv")
 # ============================================================
 # 7. SAVE RAW DATA SEPARATELY FIRST
 # ============================================================

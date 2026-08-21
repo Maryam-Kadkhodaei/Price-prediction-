@@ -38,6 +38,35 @@ For each forecast day `d`, historical electricity prices from:
 
 are considered. However for the exogenous variables only lag of one day and one week are considered.
 
+Training period: 2020-2024
+Testing period: 2024- 2025
+
+#Result of implementation of the lear and its Limitations
+
+Full-year 2025 backtest, EPEX France day-ahead. **MAE 13.2 €/MWh**, **rMAE 0.43** vs naive weekly persistence — the model beats the benchmark in every month, but:
+
+**Near-zero and negative prices are poorly calibrated.** France's PV penetration produces frequent midday price collapses. The model tracks their shape but overshoots their depth: 884 negative forecasts, half of them on hours that were actually positive (~11% of total error). Clipping at zero would cut MAE by 11.6% — deliberately not applied, since negative prices are the signal that matters for storage dispatch.
+
+**sMAPE is unreliable here.** It ranges 7.5%–98.5% across months while MAE stays within 8–17 €/MWh. Near-zero denominators inflate it regardless of absolute error. Read MAE and rMAE; sMAPE is reported only for comparability with the EPF literature.
+
+**Error is structural, not event-driven.** Removing the 30 worst days (8% of the sample) improves MAE by only 12%. Data cleaning offers little upside.
+
+**Worst hours are 19:00, 18:00 and 08:00** — the demand peaks, i.e. the hours that matter most for trading. Headline MAE understates operationally relevant error.
+
+**Linear specification cannot separate regimes.** LEAR fits one set of coefficients across nuclear-marginal nights, solar-marginal middays and gas-marginal peaks — the likely root cause of the two points above.
+
+**Missing fundamentals:** nuclear availability (dominant French price driver), TTF gas, EU ETS carbon.
+
+**Calibration window untuned:** single 3-year window; the literature recommends ensembling short (8–12 week) and long (3–4 year) windows.
+
+## Planned
+
+- Couple with Pyomo dispatch-model shadow prices (hybrid fundamental + ML)
+- Benchmark LightGBM — non-linear learner should handle regime separation
+- Add nuclear availability, TTF, EU ETS
+- Test calibration-window ensembling
+
+
 
 
 [1] S. Ben Amor, T. Möbius, F. Ziel, and F. Müsgens,

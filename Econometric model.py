@@ -162,19 +162,3 @@ plt.xlabel("Date")
 plt.title("Actual vs LEAR Forecast - January 2024")
 plt.tight_layout()
 plt.show()
-
-
-mae = mean_absolute_error(
-    results["Actual Price"],
-    results["LEAR Forecast"]
-)
-
-rmse = np.sqrt(
-    mean_squared_error(
-        results["Actual Price"],
-        results["LEAR Forecast"]
-    )
-)
-
-print("Overall MAE:", mae)
-print("Overall RMSE:", rmse)

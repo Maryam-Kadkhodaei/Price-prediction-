@@ -12,6 +12,14 @@ data = pd.read_csv(
     index_col=0
 )
 
+outage = pd.read_csv('nuclear_outage_hourly.csv', index_col=0)
+
+data['residual gen'] = (data['Actual Aggregated'] - data["Wind Onshore"]
+                        - data["Wind Offshore"]-data['Solar']).copy()
+data['nuclear_outage'] = outage['nuclear_outage_mw'].copy()
+data = data[['price', 'Forecasted Load', 'residual gen', 'Solar',"Wind Onshore",'Wind Offshore','nuclear_outage']].copy()
+
+
 #data = data[['price', 'Forecasted Load', 'Solar',"Wind Onshore", "Wind Offshore"]]
 
 data.index = pd.to_datetime(
@@ -24,15 +32,17 @@ print(data.columns)
 print(data.shape)
 
 
+
 data = data.rename(columns={
     "price": "Price",
     "Forecasted Load": "Exogenous 1",
-    'Actual Aggregated': "Exogenous 2",# genertion forecast
-     "Solar": "Exogenous 3",# forecasted solar
-     "Wind Onshore": "Exogenous 4",# forecasted wind onshore
-     "Wind Offshore": "Exogenous 5"# forecasted wind offshore
-})
+    'residual gen': "Exogenous 2",# genertion forecast
+    "Solar": "Exogenous 3",# forecasted solar
+    "Wind Onshore": "Exogenous 4",# forecasted wind onshore
+    "Wind Offshore": "Exogenous 5",# forecasted wind offshore
+    "nuclear_outage": "Exogenous 6",  # forecasted wind offshore
 
+})
 
 print(data.columns)
 

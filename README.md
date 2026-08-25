@@ -28,6 +28,8 @@ The current implementation uses:
 - Historical day-ahead electricity prices
 - Day-ahead load forecast
 - Day-ahead generation forecast
+- Nuclear availability 
+- Residual dispatchable generation forecasr
 - Day-of-week information
 For each forecast day `d`, historical electricity prices from:
 
@@ -42,6 +44,8 @@ Training period: 2020-2024
 Testing period: 2024- 2025
 
 #Result of implementation of the lear and its Limitations
+
+![Monthly MAE and rMAE](model_performance.png)
 
 Full-year 2025 backtest, EPEX France day-ahead. **MAE 13.2 €/MWh**, **rMAE 0.43** vs naive weekly persistence — the model beats the benchmark in every month, but:
 

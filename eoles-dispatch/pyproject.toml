@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eoles-dispatch"
+version = "0.1.0"
+description = "Cost-minimization dispatch model for simulating wholesale electricity prices"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [
+    { name = "Clément Leblanc" },
+]
+dependencies = [
+    "pyomo>=6.0",
+    "highspy>=1.5",
+    "pandas>=1.3",
+    "numpy>=1.20",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+collect = [
+    "entsoe-py>=0.6",
+    "python-dotenv>=0.19",
+    "urllib3<2",        # urllib3 v2 incompatible with LibreSSL (macOS system Python)
+]
+xlsx = [
+    "openpyxl>=3.0",
+]
+viz = [
+    "plotly>=5.0",
+    "matplotlib>=3.5",
+]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.4",
+    "entsoe-py>=0.6",
+    "python-dotenv>=0.19",
+    "urllib3<2",
+    "openpyxl>=3.0",
+    "plotly>=5.0",
+    "matplotlib>=3.5",
+]
+
+[project.scripts]
+eoles-dispatch = "eoles_dispatch.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"

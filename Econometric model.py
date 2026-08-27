@@ -86,7 +86,6 @@ for col in ["Exogenous 3",  "Exogenous 5"]:
         )
     )
 
-
 lear_data.to_csv(
     os.path.join(path_datasets_folder, "France.csv"),
     index_label="Date"

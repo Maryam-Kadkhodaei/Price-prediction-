@@ -1,6 +1,5 @@
 """Standard EOLES-Dispatch model with full thermal dynamics (startup, ramping, min stable generation)."""
 
-import itertools
 from pathlib import Path
 
 import pandas as pd
@@ -9,7 +8,7 @@ import pyomo.environ as pyo
 from ..config import DELTA, ETA_IN, ETA_OUT, GJ_MWH, LOAD_UNCERTAINTY, TRLOSS, VOLL
 
 
-def build_model(run_dir):
+def build_model(run_dir, initial_soc=None, initial_on=None, initial_gene=None):
     """Build and return the Pyomo ConcreteModel for the standard dispatch problem.
 
     Args:
@@ -21,6 +20,19 @@ def build_model(run_dir):
     input_dir = Path(run_dir) / "inputs"
     model = pyo.ConcreteModel()
     model.dual = pyo.Suffix(direction=pyo.Suffix.IMPORT)
+
+    # SOC of each (area, storage tech) at the first hour of this horizon.
+    # Missing entries default to half of stockMax (cold-start assumption).
+    initial_soc = initial_soc or {}
+
+    # "on" capacity level of each (area, thermal tech) at the first hour of
+    # this horizon. Missing entries default to fully available (matches the
+    # warm-start guess used below for model.on).
+    initial_on = initial_on or {}
+
+    # gene() of each (area, thermal tech) at the hour *before* this horizon,
+    # used to price ramping into the first hour. Missing entries default to 0.
+    initial_gene = initial_gene or {}
 
     # ── Inputs ──────────────────────────────────────────────────────────
 
@@ -444,7 +456,11 @@ def build_model(run_dir):
 
     # Startup / turnoff dynamics
     def on_off_rule(model, a, thr, h):
-        h_next = h + 1 if h < model.h.last() else model.h.first()
+        # Non-cyclic: no transition out of the last hour -- that belongs to
+        # the *next* window.
+        if h == model.h.last():
+            return pyo.Constraint.Skip
+        h_next = h + 1
         return (
             model.on[a, thr, h_next]
             == model.on[a, thr, h] + model.startup[a, thr, h] - model.turnoff[a, thr, h]
@@ -452,16 +468,20 @@ def build_model(run_dir):
 
     model.on_off_constraint = pyo.Constraint(model.a, model.thr, model.h, rule=on_off_rule)
 
+    def initial_on_rule(model, a, thr):
+        # Fixes the committed on/off state at the first hour of this horizon
+        # to the state carried over from the previous window.
+        h0 = model.h.first()
+        default_on = capa[a, thr] * maxaf[a, thr]
+        return model.on[a, thr, h0] == initial_on.get((a, thr), default_on)
+
+    model.initial_on_constraint = pyo.Constraint(model.a, model.thr, rule=initial_on_rule)
+
     def cons_startup_rule(model, a, thr, h):
-        if h - minTimeOFF[thr] >= model.h.first():
-            recently_off = range(h - minTimeOFF[thr], h)
-        else:
-            recently_off = itertools.chain(
-                range(model.h.first(), h),
-                range(
-                    model.h.last() - minTimeOFF[thr] + (h - model.h.first()) + 1, model.h.last() + 1
-                ),
-            )
+        # Non-cyclic: clip the lookback at the window start instead of
+        # wrapping to the end of the horizon. Equivalent to assuming no
+        # relevant turnoff happened before this window began.
+        recently_off = range(max(h - minTimeOFF[thr], model.h.first()), h)
         return model.startup[a, thr, h] <= capa[a, thr] * maxaf[a, thr] - model.on[a, thr, h] - sum(
             model.turnoff[a, thr, h_bis] for h_bis in recently_off
         )
@@ -471,15 +491,8 @@ def build_model(run_dir):
     )
 
     def cons_turnoff_rule(model, a, thr, h):
-        if h - minTimeON[thr] >= model.h.first():
-            recently_on = range(h - minTimeON[thr], h)
-        else:
-            recently_on = itertools.chain(
-                range(model.h.first(), h),
-                range(
-                    model.h.last() - minTimeON[thr] + (h - model.h.first()) + 1, model.h.last() + 1
-                ),
-            )
+        # Non-cyclic: same clipping as cons_startup_rule above.
+        recently_on = range(max(h - minTimeON[thr], model.h.first()), h)
         return model.turnoff[a, thr, h] <= model.on[a, thr, h] - sum(
             model.startup[a, thr, h_bis] for h_bis in recently_on
         )
@@ -489,10 +502,21 @@ def build_model(run_dir):
     )
 
     def ramping_up_rule(model, a, thr, h):
-        h_next = h + 1 if h < model.h.last() else model.h.first()
+        # Non-cyclic: no transition out of the last hour.
+        if h == model.h.last():
+            return pyo.Constraint.Skip
+        h_next = h + 1
         return model.ramp_up[a, thr, h_next] >= model.gene[a, thr, h_next] - model.gene[a, thr, h]
 
     model.ramping_up_constraint = pyo.Constraint(model.a, model.thr, model.h, rule=ramping_up_rule)
+
+    def initial_ramp_rule(model, a, thr):
+        # Prices ramping into the first hour of this horizon against the
+        # generation level carried over from the previous window.
+        h0 = model.h.first()
+        return model.ramp_up[a, thr, h0] >= model.gene[a, thr, h0] - initial_gene.get((a, thr), 0)
+
+    model.initial_ramp_constraint = pyo.Constraint(model.a, model.thr, rule=initial_ramp_rule)
 
     # Storage
     def stored_cap_rule(model, a, sto, h):
@@ -518,7 +542,11 @@ def build_model(run_dir):
     model.stor_out_constraint = pyo.Constraint(model.a, model.sto, model.h, rule=stor_out_rule)
 
     def storing_rule(model, a, sto, h):
-        h_next = h + 1 if h < model.h.last() else model.h.first()
+        # Non-cyclic: no transition is defined out of the last hour of this
+        # horizon -- that link belongs to the *next* window, not this one.
+        if h == model.h.last():
+            return pyo.Constraint.Skip
+        h_next = h + 1
         if sto == "lake_phs":
             return model.stored[a, sto, h_next] == (
                 model.stored[a, sto, h]
@@ -534,6 +562,15 @@ def build_model(run_dir):
         )
 
     model.storing_constraint = pyo.Constraint(model.a, model.sto, model.h, rule=storing_rule)
+
+    def initial_soc_rule(model, a, sto):
+        # Fixes the SOC at the first hour of this horizon to the state
+        # carried over from the previous window (or a cold-start default).
+        h0 = model.h.first()
+        default_soc = stockMax[a, sto] * 1000 / 2
+        return model.stored[a, sto, h0] == initial_soc.get((a, sto), default_soc)
+
+    model.initial_soc_constraint = pyo.Constraint(model.a, model.sto, rule=initial_soc_rule)
 
     def lake_res_rule(model, a, month):
         return (

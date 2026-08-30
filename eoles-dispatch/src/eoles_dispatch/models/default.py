@@ -8,7 +8,7 @@ import pyomo.environ as pyo
 from ..config import DELTA, ETA_IN, ETA_OUT, GJ_MWH, LOAD_UNCERTAINTY, TRLOSS, VOLL
 
 
-def build_model(run_dir, initial_soc=None, initial_on=None, initial_gene=None):
+def build_model(run_dir, initial_soc=None, initial_on=None):
     """Build and return the Pyomo ConcreteModel for the standard dispatch problem.
 
     Args:
@@ -29,10 +29,6 @@ def build_model(run_dir, initial_soc=None, initial_on=None, initial_gene=None):
     # this horizon. Missing entries default to fully available (matches the
     # warm-start guess used below for model.on).
     initial_on = initial_on or {}
-
-    # gene() of each (area, thermal tech) at the hour *before* this horizon,
-    # used to price ramping into the first hour. Missing entries default to 0.
-    initial_gene = initial_gene or {}
 
     # ── Inputs ──────────────────────────────────────────────────────────
 
@@ -509,14 +505,6 @@ def build_model(run_dir, initial_soc=None, initial_on=None, initial_gene=None):
         return model.ramp_up[a, thr, h_next] >= model.gene[a, thr, h_next] - model.gene[a, thr, h]
 
     model.ramping_up_constraint = pyo.Constraint(model.a, model.thr, model.h, rule=ramping_up_rule)
-
-    def initial_ramp_rule(model, a, thr):
-        # Prices ramping into the first hour of this horizon against the
-        # generation level carried over from the previous window.
-        h0 = model.h.first()
-        return model.ramp_up[a, thr, h0] >= model.gene[a, thr, h0] - initial_gene.get((a, thr), 0)
-
-    model.initial_ramp_constraint = pyo.Constraint(model.a, model.thr, rule=initial_ramp_rule)
 
     # Storage
     def stored_cap_rule(model, a, sto, h):

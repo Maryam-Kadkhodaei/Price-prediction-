@@ -462,9 +462,14 @@ def build_model(
     )
 
     def yearly_maxON_rule(model, a, thr):
-        return (
-            sum(model.on[a, thr, h] for h in model.h) / len(model.h) <= capa[a, thr] * eaf[a, thr]
-        )
+        # Budget over only the committed hours of this horizon (None means
+        # "every hour counts", i.e. the original whole-horizon behavior).
+        hours = committed_hours if committed_hours is not None else model.h
+        # Default ceiling reproduces the original average-based check
+        # (capa * eaf) scaled up to a total over `hours`.
+        default_ceiling = capa[a, thr] * eaf[a, thr] * len(hours)
+        ceiling = thermal_ceiling.get((a, thr), default_ceiling)
+        return sum(model.on[a, thr, h] for h in hours) <= ceiling
 
     model.yearly_maxON_constraint = pyo.Constraint(model.a, model.thr, rule=yearly_maxON_rule)
 

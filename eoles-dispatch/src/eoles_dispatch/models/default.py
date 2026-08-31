@@ -15,6 +15,7 @@ def build_model(
     committed_hours=None,
     lake_ceiling=None,
     thermal_ceiling=None,
+    window_hours=None,
 ):
     """Build and return the Pyomo ConcreteModel for the standard dispatch problem.
 
@@ -314,9 +315,16 @@ def build_model(
         initialize=pd.read_csv(input_dir / "exo_areas.csv", header=None).squeeze(axis=1).array,
         ordered=False,
     )
-    model.h = pyo.Set(
-        initialize=pd.read_csv(input_dir / "hours.csv", header=None).squeeze(axis=1).array
-    )
+    # window_hours restricts this build to a subset of the run's full hour
+    # range (e.g. one rolling window), so the same precomputed `inputs/`
+    # (built once for the whole backtest) can back many small solves instead
+    # of re-running the whole data pipeline per window.
+    if window_hours is not None:
+        model.h = pyo.Set(initialize=list(window_hours))
+    else:
+        model.h = pyo.Set(
+            initialize=pd.read_csv(input_dir / "hours.csv", header=None).squeeze(axis=1).array
+        )
     model.week = pyo.Set(
         initialize=pd.read_csv(input_dir / "weeks.csv", header=None).squeeze(axis=1).array
     )

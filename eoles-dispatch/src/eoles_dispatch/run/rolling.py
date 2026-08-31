@@ -357,3 +357,90 @@ def solve_window(
 
     extracted = extract_committed_state(model, window["committed_hours"], hours_months)
     return model, extracted
+
+
+def run_rolling_backtest(run_dir, solver="highs", verbose=True):
+    """Run a full rolling-horizon backtest over an existing run's period.
+
+    Requires the run to already exist (created via create_run, which builds
+    inputs/ once for the whole period) -- this reuses those same inputs for
+    every window instead of reformatting data per window.
+
+    Args:
+        run_dir: path to the run directory.
+        solver: solver name, passed through to solve_window.
+        verbose: print a one-line progress message per committed day.
+
+    Returns:
+        pandas.DataFrame with columns ['hour', 'area', 'price'] -- one row
+        per (area, hour) for every committed hour of the whole backtest, in
+        chronological order. This is the look-ahead-free MCP series meant
+        to feed LEAR, as opposed to the perfect-foresight prices.csv a
+        plain `solve_run` produces.
+    """
+    from pathlib import Path
+
+    import pandas as pd
+
+    run_dir = Path(run_dir)
+    input_dir = run_dir / "inputs"
+
+    hours = sorted(pd.read_csv(input_dir / "hours.csv", header=None).squeeze(axis=1).tolist())
+    hour_month_df = pd.read_csv(
+        input_dir / "hour_month.csv", header=None, names=["hour", "month"]
+    )
+    hours_months = hour_month_df.set_index("hour")["month"].to_dict()
+
+    windows = make_rolling_windows(hours)
+    days = [w["committed_hours"] for w in windows]
+    day_to_month = compute_day_to_month(days, hours_months)
+    n_days_total = len(windows)
+
+    budget_inputs = load_budget_inputs(run_dir)
+    remaining_lake, remaining_thermal = initial_budgets(budget_inputs, n_hours=len(hours))
+
+    committed_results = {}  # day_index -> extract_committed_state() result
+    price_rows = []
+
+    for window in windows:
+        day_index = window["day_index"]
+        source = state_source_day_index(day_index)
+        state = committed_results.get(source) if source is not None else None
+
+        if verbose:
+            ch = window["committed_hours"]
+            print(
+                f"[rolling] day {day_index + 1}/{n_days_total} "
+                f"(hours {ch[0]}-{ch[-1]})..."
+            )
+
+        model, extracted = solve_window(
+            run_dir,
+            window,
+            state,
+            remaining_lake,
+            remaining_thermal,
+            day_to_month,
+            n_days_total,
+            hours_months,
+            solver=solver,
+        )
+
+        # Decrement the running budgets by what this committed day actually used.
+        for key, used in extracted["on_used"].items():
+            remaining_thermal[key] = remaining_thermal.get(key, 0.0) - used
+        for key, used in extracted["lake_used"].items():
+            remaining_lake[key] = remaining_lake.get(key, 0.0) - used
+
+        committed_results[day_index] = extracted
+
+        # Pull this day's committed prices (dual of the adequacy constraint).
+        dual_dict = dict(model.dual)
+        for a in model.a:
+            for h in window["committed_hours"]:
+                price = dual_dict.get(model.adequacy_constraint[a, h], 0.0)
+                price_rows.append({"hour": h, "area": a, "price": price})
+
+        del model  # don't hold ~365 solved LPs in memory over a full backtest
+
+    return pd.DataFrame(price_rows).sort_values(["hour", "area"]).reset_index(drop=True)

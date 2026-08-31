@@ -152,3 +152,96 @@ def extract_committed_state(model, committed_hours, hours_months):
         "on_used": on_used,
         "lake_used": lake_used,
     }
+
+
+def load_budget_inputs(run_dir):
+    """Read the full-period totals needed to seed the running budgets.
+
+    Reads directly from the run's precomputed inputs/ (built once by
+    create_run for the whole backtest), using the same column conventions
+    as models/default.py.
+
+    Args:
+        run_dir: path to the run directory (containing inputs/).
+
+    Returns:
+        dict with:
+            "lake_inflows": {(area, month): GWh} -- full month totals.
+            "capa": {(area, thr): GW}
+            "eaf": {(area, thr): fraction}
+    """
+    from pathlib import Path
+
+    import pandas as pd
+
+    input_dir = Path(run_dir) / "inputs"
+
+    lake_inflows_df = pd.read_csv(
+        input_dir / "lake_inflows.csv", header=None, names=["a", "month", "value"]
+    )
+    lake_inflows = {
+        (row.a, row.month): row.value * 1000  # TWh -> GWh, matches default.py
+        for row in lake_inflows_df.itertuples()
+    }
+
+    capa_df = pd.read_csv(input_dir / "capa.csv", header=None, names=["a", "tec", "value"])
+    capa = {(row.a, row.tec): row.value for row in capa_df.itertuples()}
+
+    eaf_df = pd.read_csv(input_dir / "yEAF.csv", header=None, names=["a", "thr", "value"])
+    eaf = {(row.a, row.thr): row.value for row in eaf_df.itertuples()}
+
+    return {"lake_inflows": lake_inflows, "capa": capa, "eaf": eaf}
+
+
+def compute_day_to_month(days, hours_months):
+    """Map each calendar day index to the month its hours belong to.
+
+    Args:
+        days: list of per-day hour lists (days[d] = day d's 24 hours), as
+            chunked internally by make_rolling_windows.
+        hours_months: {hour: month} lookup.
+
+    Returns:
+        list of month values, one per day index (uses the day's first hour;
+        a calendar day is assumed to belong to a single month).
+    """
+    return [hours_months[day_hours[0]] for day_hours in days]
+
+
+def initial_budgets(budget_inputs, n_hours):
+    """Compute the starting remaining-budget trackers for a whole backtest.
+
+    Args:
+        budget_inputs: the dict returned by load_budget_inputs.
+        n_hours: total hours in the whole backtest period (the thermal
+            budget spans the whole period, not just one month).
+
+    Returns:
+        (remaining_lake, remaining_thermal) dicts:
+            remaining_lake: {(area, month): GWh}
+            remaining_thermal: {(area, thr): GWh-equivalent on-hours}
+    """
+    remaining_lake = dict(budget_inputs["lake_inflows"])
+    capa = budget_inputs["capa"]
+    eaf = budget_inputs["eaf"]
+    remaining_thermal = {
+        key: capa[key] * eaf[key] * n_hours for key in capa if key in eaf
+    }
+    return remaining_lake, remaining_thermal
+
+
+def prorated_ceiling(remaining_budget, periods_left):
+    """One committed day's fair share of a remaining budget.
+
+    `periods_left` counts today plus every remaining day of the enclosing
+    period (month, for hydro; whole backtest, for thermal EAF) -- so the
+    very last day of a month gets periods_left == 1, i.e. its full
+    remaining share, avoiding leftover water/quota stranded unused.
+
+    Returns 0 for a non-positive periods_left (bookkeeping edge case)
+    instead of raising, so it degrades to "nothing left" rather than
+    crashing a whole backtest.
+    """
+    if periods_left <= 0:
+        return 0.0
+    return remaining_budget / periods_left

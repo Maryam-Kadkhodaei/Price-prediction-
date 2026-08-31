@@ -81,3 +81,74 @@ def state_source_day_index(day_index):
     """
     source = day_index - 2
     return source if source >= 0 else None
+
+
+def extract_committed_state(model, committed_hours, hours_months):
+    """Pull the real state and resource usage out of a solved window.
+
+    Only the committed (middle) day's results are trusted, so this reads
+    the state at the hour right after it ends (the first hour of the
+    window's own look-ahead buffer day) -- not the window's own last hour,
+    which belongs to a day that gets re-solved as a *different* window's
+    buffer and isn't itself trustworthy.
+
+    Args:
+        model: a solved Pyomo ConcreteModel, as returned by build_model.
+        committed_hours: this window's middle-day hours (sorted list of int).
+        hours_months: {hour: month} lookup, same convention as build_model's
+            internal dict (derived from hour_month.csv).
+
+    Returns:
+        dict with:
+            "next_hour": hour right after the committed day, or None if it
+                isn't part of this window (only happens for the very last
+                window of the whole backtest -- nothing needs it then).
+            "initial_soc": {(area, sto): stored value at next_hour} -- feed
+                straight into the next relevant window's initial_soc.
+            "initial_on": {(area, thr): on value at next_hour} -- feed into
+                initial_on.
+            "on_used": {(area, thr): sum of on[h] over committed_hours} --
+                subtract from the running yearly EAF budget.
+            "lake_used": {(area, month): net hydro output over committed_hours
+                in that month} -- subtract from the running monthly hydro
+                budget.
+    """
+    import pyomo.environ as pyo
+
+    from ..config import ETA_IN, ETA_OUT
+
+    last_hour = committed_hours[-1]
+    next_hour = last_hour + 1
+    have_next = next_hour in model.h
+
+    initial_soc = {}
+    initial_on = {}
+    if have_next:
+        for a in model.a:
+            for sto in model.sto:
+                initial_soc[(a, sto)] = pyo.value(model.stored[a, sto, next_hour])
+            for thr in model.thr:
+                initial_on[(a, thr)] = pyo.value(model.on[a, thr, next_hour])
+
+    on_used = {}
+    for a in model.a:
+        for thr in model.thr:
+            on_used[(a, thr)] = sum(pyo.value(model.on[a, thr, h]) for h in committed_hours)
+
+    eta_lake = ETA_IN["lake_phs"] * ETA_OUT["lake_phs"]
+    lake_used = {}
+    for a in model.a:
+        for h in committed_hours:
+            month = hours_months[h]
+            net = pyo.value(model.gene[a, "lake_phs", h]) - pyo.value(
+                model.storage[a, "lake_phs", h]
+            ) * eta_lake
+            lake_used[(a, month)] = lake_used.get((a, month), 0.0) + net
+
+    return {
+        "next_hour": next_hour if have_next else None,
+        "initial_soc": initial_soc,
+        "initial_on": initial_on,
+        "on_used": on_used,
+        "lake_used": lake_used,
+    }

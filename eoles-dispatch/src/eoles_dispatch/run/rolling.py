@@ -245,3 +245,115 @@ def prorated_ceiling(remaining_budget, periods_left):
     if periods_left <= 0:
         return 0.0
     return remaining_budget / periods_left
+
+
+def build_ceilings(day_index, day_to_month, remaining_lake, remaining_thermal, n_days_total):
+    """Compute this window's prorated budget ceilings.
+
+    Args:
+        day_index: this window's committed day.
+        day_to_month: list mapping day_index -> month (compute_day_to_month).
+        remaining_lake: running {(area, month): GWh} budget tracker.
+        remaining_thermal: running {(area, thr): GWh-equivalent} tracker.
+        n_days_total: total days in the whole backtest.
+
+    Returns:
+        (lake_ceiling, thermal_ceiling) dicts, ready to pass straight into
+        build_model. lake_ceiling only has entries for the committed day's
+        own month -- lake_res_rule skips every other month anyway once
+        committed_hours doesn't touch it, so there's nothing to prorate
+        there.
+    """
+    month = day_to_month[day_index]
+    periods_left_lake = sum(1 for m in day_to_month[day_index:] if m == month)
+    periods_left_thermal = n_days_total - day_index
+
+    lake_ceiling = {
+        (a, m): prorated_ceiling(budget, periods_left_lake)
+        for (a, m), budget in remaining_lake.items()
+        if m == month
+    }
+    thermal_ceiling = {
+        key: prorated_ceiling(budget, periods_left_thermal)
+        for key, budget in remaining_thermal.items()
+    }
+    return lake_ceiling, thermal_ceiling
+
+
+def solve_window(
+    run_dir,
+    window,
+    state,
+    remaining_lake,
+    remaining_thermal,
+    day_to_month,
+    n_days_total,
+    hours_months,
+    solver="highs",
+):
+    """Build, solve, and extract results for one rolling window.
+
+    Args:
+        run_dir: run directory (inputs/ already built for the whole backtest
+            by create_run -- this does NOT reformat inputs per window).
+        window: one entry from make_rolling_windows.
+        state: the extract_committed_state() result from the window at
+            state_source_day_index(window["day_index"]), or None for a cold
+            start (the first two windows of the whole backtest).
+        remaining_lake, remaining_thermal, day_to_month, n_days_total: as
+            produced by initial_budgets / compute_day_to_month -- read here,
+            not modified (the caller applies extracted_state's on_used /
+            lake_used to decrement them, keeping this function a pure
+            "solve one window" step).
+        hours_months: {hour: month} lookup, passed through to
+            extract_committed_state.
+        solver: solver name (default "highs", matching solve_run's default).
+
+    Returns:
+        (model, extracted_state) tuple.
+
+    Raises:
+        RuntimeError if the solver doesn't reach an optimal/feasible
+        solution -- this is not caught here so a broken window stops the
+        whole backtest loudly instead of silently poisoning later windows'
+        state.
+    """
+    import pyomo.environ  # noqa: F401 -- registers solver plugins
+    from pyomo.opt import SolverFactory, TerminationCondition
+
+    from ..models.default import build_model
+
+    day_index = window["day_index"]
+    lake_ceiling, thermal_ceiling = build_ceilings(
+        day_index, day_to_month, remaining_lake, remaining_thermal, n_days_total
+    )
+
+    initial_soc = state["initial_soc"] if state is not None else None
+    initial_on = state["initial_on"] if state is not None else None
+
+    model = build_model(
+        run_dir,
+        initial_soc=initial_soc,
+        initial_on=initial_on,
+        committed_hours=window["committed_hours"],
+        lake_ceiling=lake_ceiling,
+        thermal_ceiling=thermal_ceiling,
+        window_hours=window["window_hours"],
+    )
+
+    solver_name = "appsi_highs" if solver == "highs" else solver
+    opt = SolverFactory(solver_name)
+    if solver == "highs":
+        opt.highs_options["solver"] = "ipm"
+        opt.highs_options["run_crossover"] = "on"
+    results = opt.solve(model, tee=False)
+
+    tc = results.solver.termination_condition
+    if tc not in (TerminationCondition.optimal, TerminationCondition.feasible):
+        raise RuntimeError(
+            f"day_index={day_index}: solver did not find an optimal solution "
+            f"(termination condition: {tc})"
+        )
+
+    extracted = extract_committed_state(model, window["committed_hours"], hours_months)
+    return model, extracted

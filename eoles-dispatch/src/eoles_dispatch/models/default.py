@@ -502,10 +502,15 @@ def build_model(
 
     def initial_on_rule(model, a, thr):
         # Fixes the committed on/off state at the first hour of this horizon
-        # to the state carried over from the previous window.
+        # to the state carried over from the previous window. On a cold start
+        # (no prior window's state available for this unit), skip the
+        # constraint entirely rather than inventing a default value -- on[h0]
+        # is then free, bounded only by the unit's normal capacity limits,
+        # same as it would be for any other hour.
+        if (a, thr) not in initial_on:
+            return pyo.Constraint.Skip
         h0 = model.h.first()
-        default_on = capa[a, thr] * maxaf[a, thr]
-        return model.on[a, thr, h0] == initial_on.get((a, thr), default_on)
+        return model.on[a, thr, h0] == initial_on[(a, thr)]
 
     model.initial_on_constraint = pyo.Constraint(model.a, model.thr, rule=initial_on_rule)
 

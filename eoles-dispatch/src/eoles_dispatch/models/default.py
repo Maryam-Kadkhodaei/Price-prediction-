@@ -8,7 +8,14 @@ import pyomo.environ as pyo
 from ..config import DELTA, ETA_IN, ETA_OUT, GJ_MWH, LOAD_UNCERTAINTY, TRLOSS, VOLL
 
 
-def build_model(run_dir, initial_soc=None, initial_on=None):
+def build_model(
+    run_dir,
+    initial_soc=None,
+    initial_on=None,
+    committed_hours=None,
+    lake_ceiling=None,
+    thermal_ceiling=None,
+):
     """Build and return the Pyomo ConcreteModel for the standard dispatch problem.
 
     Args:
@@ -29,6 +36,22 @@ def build_model(run_dir, initial_soc=None, initial_on=None):
     # this horizon. Missing entries default to fully available (matches the
     # warm-start guess used below for model.on).
     initial_on = initial_on or {}
+
+    # Hours (subset of model.h, filled in below) that actually count toward
+    # the monthly hydro / yearly thermal-availability budgets below -- i.e.
+    # the committed day of a rolling window, not its warm-up/look-ahead
+    # buffer days. None means "every hour in this horizon counts" (the
+    # original whole-horizon behavior).
+    committed_hours = set(committed_hours) if committed_hours is not None else None
+
+    # Pre-computed monthly hydro budget ceiling, {(area, month): GWh}.
+    # Missing entries default to the full month's inflow (original behavior).
+    lake_ceiling = lake_ceiling or {}
+
+    # Pre-computed thermal on-time budget ceiling, {(area, thr): GWh-equivalent
+    # on-hours}. Missing entries default to capa * eaf * len(hours) (original
+    # behavior).
+    thermal_ceiling = thermal_ceiling or {}
 
     # ── Inputs ──────────────────────────────────────────────────────────
 

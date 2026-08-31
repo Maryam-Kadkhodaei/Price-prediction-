@@ -589,13 +589,26 @@ def build_model(
     model.initial_soc_constraint = pyo.Constraint(model.a, model.sto, rule=initial_soc_rule)
 
     def lake_res_rule(model, a, month):
+        # Budget over only the committed hours of this horizon that fall in
+        # this month (None means "every hour counts", i.e. the original
+        # whole-month behavior).
+        if committed_hours is None:
+            hours = months_hours[month]
+        else:
+            hours = [h for h in months_hours[month] if h in committed_hours]
+        if not hours:
+            # This window's committed hours don't touch this month at all.
+            return pyo.Constraint.Skip
+        # Default ceiling reproduces the original whole-month total.
+        default_ceiling = lake_inflows[a, month] * 1000
+        ceiling = lake_ceiling.get((a, month), default_ceiling)
         return (
             sum(
                 model.gene[a, "lake_phs", h]
                 - model.storage[a, "lake_phs", h] * ETA_IN["lake_phs"] * ETA_OUT["lake_phs"]
-                for h in months_hours[month]
+                for h in hours
             )
-            == lake_inflows[a, month] * 1000
+            <= ceiling
         )
 
     model.lake_res_constraint = pyo.Constraint(model.a, model.month, rule=lake_res_rule)

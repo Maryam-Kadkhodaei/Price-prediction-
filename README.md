@@ -70,7 +70,36 @@ Full-year 2025 backtest, EPEX France day-ahead. **MAE 13.2 €/MWh**, **rMAE 0.4
 - Add nuclear availability, TTF, EU ETS
 - Test calibration-window ensembling
 
+## Second step: EOLES-Dispatch fundamental price signal
 
+The "Planned" coupling with a fundamental dispatch model is now implemented: [EOLES-Dispatch](https://github.com/c-leblanc/EOLES-Dispatch), a Pyomo cost-minimization unit-commitment model, is used to compute a simulated market-clearing price (MCP) per hour, intended as an additional input feature for LEAR/LightGBM alongside the exogenous variables above.
+
+### Motivation: look-ahead bias
+
+EOLES-Dispatch was originally built to solve an entire year at once, with the year treated as cyclic (December 31 wraps into January 1). Solved this way, the model effectively has perfect foresight of the whole period when it decides how to run every power plant and use every reservoir on any given day — including days that, from a forecasting standpoint, haven't happened yet. A price feature computed like this cannot be reproduced in a real forecasting setting, and it risks leaking information the model should not have access to.
+
+### Fix: rolling, non-cyclic horizon
+
+The model was rewritten to run as a receding-horizon (MPC-style) simulation instead:
+
+- All cyclic (year-end-wraps-to-year-start) boundary constraints were removed and replaced with genuine start-of-horizon conditions.
+- The dispatch is solved in overlapping 3-day windows (buffer day, committed day, look-ahead buffer day), sliding forward one day at a time. Only the middle day's result is kept; the buffer days exist purely to give the optimizer local context and are discarded.
+- Battery/reservoir state-of-charge and thermal on/off status are carried over from the window 2 days prior (the last window whose committed day is now settled), so each window starts from a real, already-decided state rather than an assumption.
+- Resource constraints that used to apply to the whole year at once (total hydro reservoir drawdown, total thermal running hours) are now prorated: each window gets a ceiling equal to the remaining budget divided by the number of periods left, so a single short-sighted window cannot exhaust a whole month's water or a whole year's fuel allowance in one pass.
+
+A cold-start bug was found and fixed during this rewrite: the very first window used to force every thermal unit to its full available capacity on hour 1 by default, which is infeasible whenever that unit's prorated ceiling is tighter than its full-capacity default. The fix leaves a unit's initial on/off state unconstrained when no real prior-window value is available, instead of inventing one. A regression test for this (`tests/test_rolling_horizon.py`) runs in CI.
+
+### Validation (January 2019)
+
+The rolling-horizon price series was compared against both the old full-foresight version and real EPEX France day-ahead prices for the same month (from the ENTSO-E Transparency Platform):
+
+- The rolling version's price volatility (std. dev. **14.0 €/MWh**) closely matches real prices (**14.1 €/MWh**), while the full-foresight version is roughly half as volatile (**6.2 €/MWh**) — a perfect-information optimizer smooths out the price swings a real, foresight-limited system actually exhibits.
+- Point-by-point accuracy against real prices is comparable between the two (MAE ≈ 7 €/MWh either way) — the rolling version is not "more accurate" hour-by-hour, but it is the only one that is actually deployable, since the full-foresight version requires future data unavailable at forecast time.
+- The window hand-off does not introduce artificial price discontinuities: the largest hour-to-hour price jumps in the series all occur in the interior of a committed day (e.g. evening demand peaks), not at the seams between windows.
+
+### Known limitation: hydro/thermal budget proration
+
+The even proration of remaining hydro and thermal budgets across remaining periods is a simplification. It reliably prevents one window from draining a whole month's water or year's fuel allowance, but it also prevents legitimately concentrating resource use into a specific high-value window, since it has no notion of which future periods are actually more valuable. In practice this suppresses some of the deepest price troughs seen in the full-foresight version (extreme hydro-driven price collapses during systemwide oversupply). The correct fix is a dynamic water-value formulation (e.g. SDDP-style, calibrated from past years' data so it doesn't leak the forecast period's own future) rather than a flat equal-share ceiling; this is future work, not yet implemented.
 
 
 [1] S. Ben Amor, T. Möbius, F. Ziel, and F. Müsgens,

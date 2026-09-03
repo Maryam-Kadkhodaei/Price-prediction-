@@ -14,8 +14,12 @@ and stitched into the final output series.
 """
 
 
-def make_rolling_windows(hours):
-    """Split a sorted, consecutive hour range into overlapping 3-day windows.
+def make_rolling_windows(hours, buffer_days=1):
+    """Split a sorted, consecutive hour range into overlapping windows.
+
+    Each window covers [day - buffer_days, ..., day, ..., day + buffer_days]
+    (2 * buffer_days + 1 calendar days total) and commits only the middle
+    day. buffer_days=1 (the default) gives the original 3-day window.
 
     Args:
         hours: Sorted list/array of consecutive POSIX hours (int) spanning
@@ -23,6 +27,12 @@ def make_rolling_windows(hours):
             whole number of 24-hour calendar days (POSIX/UTC hours have no
             DST gaps, so this always holds for a period produced by
             compute_hour_mappings).
+        buffer_days: Number of calendar days of context before and after the
+            committed day. Larger values give the solver more look-ahead
+            (closer to full-foresight behaviour, more compute) at the cost
+            of re-introducing more of the look-ahead bias this whole
+            rolling-horizon design exists to remove; smaller values are more
+            myopic and more exposed to boundary/proration artifacts.
 
     Returns:
         List of dicts, one per calendar day, in chronological order of the
@@ -32,9 +42,10 @@ def make_rolling_windows(hours):
                 "window_hours": [int, ...], # hours to build the model over
                 "committed_hours": [int, ...],  # this window's middle day
             }
-        The first and last windows have no previous/next day to draw on and
-        fall back to a 2-day window (missing that side's buffer) -- they are
-        the only ones with no real prior state / no look-ahead.
+        The first and last `buffer_days` windows have no previous/next day
+        (of the full amount) to draw on and fall back to a shorter window on
+        that side -- they are the only ones with no real prior state / no
+        full look-ahead.
     """
     hours = sorted(hours)
     if len(hours) % 24 != 0:
@@ -47,12 +58,11 @@ def make_rolling_windows(hours):
 
     windows = []
     for d in range(n_days):
+        lo = max(d - buffer_days, 0)
+        hi = min(d + buffer_days, n_days - 1)
         window_hours = []
-        if d > 0:
-            window_hours += days[d - 1]
-        window_hours += days[d]
-        if d < n_days - 1:
-            window_hours += days[d + 1]
+        for k in range(lo, hi + 1):
+            window_hours += days[k]
 
         windows.append(
             {
@@ -65,21 +75,22 @@ def make_rolling_windows(hours):
     return windows
 
 
-def state_source_day_index(day_index):
+def state_source_day_index(day_index, buffer_days=1):
     """Which committed day's end-state a window's initial conditions come from.
 
-    Window `day_index` covers [day_index - 1, day_index, day_index + 1] and
-    commits day_index. Its first modeled hour is the start of day
-    (day_index - 1), so it needs the real state at the end of day
-    (day_index - 2) -- which was committed by the window at day_index - 2,
-    not by the immediately preceding window (whose committed day,
-    day_index - 1, gets *re-solved* here as this window's own warm-up
-    buffer, not reused directly).
+    Window `day_index` covers [day_index - buffer_days, ..., day_index, ...,
+    day_index + buffer_days] and commits day_index. Its first modeled hour
+    is the start of day (day_index - buffer_days), so it needs the real
+    state at the end of day (day_index - buffer_days - 1) -- which was
+    committed by the window at that day index, not by the immediately
+    preceding window (whose committed day gets *re-solved* here as part of
+    this window's own warm-up buffer, not reused directly).
 
-    Returns None when no such day exists yet (the first two windows of the
-    whole backtest), meaning the cold-start defaults in build_model apply.
+    Returns None when no such day exists yet (the first buffer_days + 1
+    windows of the whole backtest), meaning the cold-start defaults in
+    build_model apply.
     """
-    source = day_index - 2
+    source = day_index - buffer_days - 1
     return source if source >= 0 else None
 
 
@@ -359,7 +370,7 @@ def solve_window(
     return model, extracted
 
 
-def run_rolling_backtest(run_dir, solver="highs", verbose=True):
+def run_rolling_backtest(run_dir, solver="highs", verbose=True, buffer_days=1):
     """Run a full rolling-horizon backtest over an existing run's period.
 
     Requires the run to already exist (created via create_run, which builds
@@ -370,6 +381,9 @@ def run_rolling_backtest(run_dir, solver="highs", verbose=True):
         run_dir: path to the run directory.
         solver: solver name, passed through to solve_window.
         verbose: print a one-line progress message per committed day.
+        buffer_days: days of context/look-ahead on each side of the
+            committed day (see make_rolling_windows). Default 1 gives the
+            original 3-day window.
 
     Returns:
         pandas.DataFrame with columns ['hour', 'area', 'price'] -- one row
@@ -391,7 +405,7 @@ def run_rolling_backtest(run_dir, solver="highs", verbose=True):
     )
     hours_months = hour_month_df.set_index("hour")["month"].to_dict()
 
-    windows = make_rolling_windows(hours)
+    windows = make_rolling_windows(hours, buffer_days=buffer_days)
     days = [w["committed_hours"] for w in windows]
     day_to_month = compute_day_to_month(days, hours_months)
     n_days_total = len(windows)
@@ -404,7 +418,7 @@ def run_rolling_backtest(run_dir, solver="highs", verbose=True):
 
     for window in windows:
         day_index = window["day_index"]
-        source = state_source_day_index(day_index)
+        source = state_source_day_index(day_index, buffer_days=buffer_days)
         state = committed_results.get(source) if source is not None else None
 
         if verbose:

@@ -111,7 +111,9 @@ def load_tv_inputs(
     vre_profiles = pd.concat([vre_profiles, river_cf])
 
     # 4. Derived monthly/weekly variables
-    nucMaxAF = compute_nuclear_max_af(production, installed_capa, areas, hour_week)
+    nucMaxAF = compute_nuclear_max_af(
+        production, installed_capa, areas, hour_week, data_dir=data_dir, year=simul_year
+    )
 
     lake_inflows = compute_lake_inflows(production, areas, hour_month)
     hMaxIn, hMaxOut = compute_hydro_limits(production, areas, hour_month)

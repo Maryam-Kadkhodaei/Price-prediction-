@@ -107,7 +107,36 @@ def compute_vre_capacity_factors(
 # ── Availability factor computation ──
 
 
-def compute_nuclear_max_af(production, installed_capa, areas, hour_week):
+def _load_nuclear_availability_override(data_dir, year, area, hour_week):
+    """Load a real, forecast-safe nuclear availability file for one area, if present.
+
+    Looks for data/<year>/nuclear_availability_<area>.csv (columns 'hour',
+    'availability_factor'; 'hour' a naive UTC datetime on the same hourly
+    grid as the other data/<year>/*.csv inputs). Returns a weekly-resolution
+    DataFrame ['area', 'week', 'value'] (weekly MIN of the hourly factor), or
+    None if no such file exists for this area/year.
+    """
+    if data_dir is None or year is None:
+        return None
+    from pathlib import Path
+
+    path = Path(data_dir) / str(year) / f"nuclear_availability_{area}.csv"
+    if not path.exists():
+        return None
+
+    raw = pd.read_csv(path)
+    raw["hour"] = pd.to_datetime(raw["hour"])
+    from ..utils import to_posix_hours
+
+    raw["hour"] = to_posix_hours(raw["hour"])
+    merged = raw.merge(hour_week, on="hour", how="inner")
+    weekly = merged.groupby("week")["availability_factor"].min().reset_index()
+    weekly["area"] = area
+    weekly = weekly.rename(columns={"availability_factor": "value"})
+    return weekly[["area", "week", "value"]]
+
+
+def compute_nuclear_max_af(production, installed_capa, areas, hour_week, data_dir=None, year=None):
     """Compute weekly max nuclear availability factor from raw production.
 
     AF = hourly_production / installed_capacity, clipped to [0, 1].
@@ -121,6 +150,21 @@ def compute_nuclear_max_af(production, installed_capa, areas, hour_week):
         areas: List of area codes.
         hour_week: DataFrame with columns ['hour', 'week'] (POSIX hours → YYWW).
 
+        data_dir: Path to the data/ directory (optional). If a
+            data/<year>/nuclear_availability_<area>.csv file exists (columns
+            'hour', 'availability_factor' -- a genuine forecast-safe
+            availability derived from ENTSO-E outage/unavailability records,
+            see fetch_nuclear_outages_2019.py / build_nuclear_availability.py),
+            it overrides the realized-production proxy for that area: the
+            weekly ceiling becomes the weekly MIN of the hourly availability
+            factor (the binding constraint for the week is its worst hour).
+            When no such file exists for an area, falls back to the
+            realized-production-derived proxy below. When the file exists but
+            is trivially 1.0 everywhere (e.g. no real outage data obtained
+            yet for that year), this correctly imposes no extra constraint,
+            rather than silently reusing the leaky realized-production proxy.
+        year: Simulation year (optional, used to locate data_dir/<year>/...).
+
     Returns:
         DataFrame with columns ['area', 'week', 'value'].
     """
@@ -128,6 +172,11 @@ def compute_nuclear_max_af(production, installed_capa, areas, hour_week):
     weeks = hour_week["week"].unique().tolist()
 
     for area in areas:
+        override = _load_nuclear_availability_override(data_dir, year, area, hour_week)
+        if override is not None:
+            frames.append(override)
+            continue
+
         df = production[area]
         if "nuclear" not in df.columns:
             for w in weeks:

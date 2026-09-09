@@ -160,6 +160,12 @@ energy available each month.
 
 ### 3.7 Nuclear availability
 
+Two sources feed this, in priority order. `compute_nuclear_max_af()` tries
+the real-outage override first for each area; if no override file exists for
+that area/year, it falls back to the realized-production proxy.
+
+**a) Realized-production proxy (default fallback)**
+
 | | |
 |---|---|
 | **Source** | Derived at run creation time from `production_<area>.csv` + `installed_capacity_<area>.csv` |
@@ -170,6 +176,63 @@ energy available each month.
 
 The weekly maximum (rather than the mean) reflects the peak achievable output
 during each week, capturing the nuclear fleet's maintenance schedule.
+
+**Known limitation**: this proxy uses *realized* production, which is only
+known after the fact. In the rolling-horizon backtest (`run/rolling.py`),
+using it means a window's committed/buffer days effectively see production
+data from days they would not actually know yet at forecast time --
+reintroducing a form of look-ahead leakage, on top of the model's economic
+decisions themselves being genuinely optimized rather than observed.
+
+**b) Real outage-based override (preferred, forecast-safe, currently FR only)**
+
+| | |
+|---|---|
+| **Source** | ENTSO-E "unavailability of generation units" export (`query_unavailability_of_generation_units`, per-unit planned maintenance / forced outage records) |
+| **Calculation** | See below |
+| **Resolution** | Hourly, aggregated to weekly (min) when consumed by the model |
+| **Unit** | Dimensionless (0 to 1) |
+| **Computed by** | `build_nuclear_availability.py` (writes the override file), loaded by `run/compute.py:_load_nuclear_availability_override()` |
+| **Input file** | `data/<year>/nuclear_availability_<area>.csv` (columns: `hour`, `availability_factor`) -- optional; only areas/years with a real fetched outage file get this treatment |
+
+Unlike realized production, ENTSO-E outage records are announced *in
+advance* (planned maintenance weeks ahead of time, unplanned outages as soon
+as they occur but before the affected hours pass) -- this is the one part
+of EOLES's nuclear modeling that can genuinely be forecast-safe, closing
+part of the actual-vs-forecast leakage gap identified for the rolling-horizon
+backtest.
+
+**Methodology** (`build_nuclear_availability.py`):
+1. Filter the raw export to `plant_type == "Nuclear"` and `docstatus` blank
+   (Active -- ENTSO-E marks superseded/cancelled revisions of the same
+   outage with `docstatus = "Cancelled"`; only the blank/Active rows reflect
+   the currently valid record).
+2. Each active row is one flat segment `[start, end)` where the unit's
+   *available* capacity is `avail_qty` (out of `nominal_power`).
+3. Per unit: start from full `nominal_power` every hour, then for each
+   active row belonging to that unit, take the elementwise **min** of the
+   current value and `avail_qty` over the overlapping hours (handles
+   overlapping/duplicate records correctly instead of double-subtracting;
+   units with zero outage rows in the period stay at full capacity, they
+   are not silently dropped).
+4. Sum available MW across all ~58 FR nuclear units, divide by total
+   installed nuclear capacity (`data/<year>/installed_capacity_FR.csv`) to
+   get the hourly availability factor, clipped to [0, 1].
+5. The hour grid is built from `data/<year>/demand_<area>.csv`'s own `hour`
+   column (not reconstructed from the calendar year) so it is guaranteed to
+   align exactly with the rest of the pipeline's hourly convention.
+
+**Regenerating this file** (once you have a raw outage export from
+`query_unavailability_of_generation_units`, e.g. via the ENTSO-E API or the
+Transparency Platform's "Unavailability of Generation Units" report):
+
+```bash
+python build_nuclear_availability.py FR_outages.csv FR 2019 --installed-capacity-mw 63130
+```
+
+Validated (FR, 2019): mean availability 79.0% (min 56.6%, max 99.8%) --
+consistent with France's typical nuclear capacity factor for that period.
+(FR, 2020-2025: mean 71.7%, min 39.2%, max 96.0%.)
 
 ### 3.8 Elexon BMRS fallback for GB (post-Brexit)
 

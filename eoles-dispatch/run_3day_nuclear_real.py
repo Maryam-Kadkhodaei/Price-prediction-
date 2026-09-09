@@ -1,0 +1,16 @@
+import time
+from eoles_dispatch.run.rolling import run_rolling_backtest
+
+RUN_DIR = "runs/smoke_test_jan2_nuclear_real"
+
+start = time.time()
+prices = run_rolling_backtest(RUN_DIR, buffer_days=1)
+elapsed = time.time() - start
+
+out_path = f"{RUN_DIR}/outputs/rolling_prices_3day.csv"
+prices.to_csv(out_path, index=False)
+
+print(f"\ndone in {elapsed/60:.1f} minutes")
+print(f"saved to {out_path}")
+print(prices.head())
+print(len(prices))

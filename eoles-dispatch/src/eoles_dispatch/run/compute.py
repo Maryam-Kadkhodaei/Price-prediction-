@@ -73,6 +73,24 @@ def compute_vre_capacity_factors(
         for area in areas:
             df = production[area]
             if tec not in df.columns:
+                # This area has no reported generation of this technology
+                # (either it has none, or ENTSO-E's export for this
+                # year/area doesn't break it out separately -- e.g. CH
+                # stopped reporting 'river' as its own PSR type in some
+                # years). Emit an explicit all-zero profile rather than
+                # skipping the (area, tec) pair entirely: the model's
+                # gene_vre_constraint is built over the full area x vre
+                # x hour grid regardless of data availability, and a
+                # missing row there raises a KeyError at solve time.
+                frame = pd.DataFrame(
+                    {
+                        "area": area,
+                        "tec": tec,
+                        "hour": df["hour"].values,
+                        "value": np.zeros(len(df)),
+                    }
+                )
+                frames.append(frame)
                 continue
 
             prod_gw = df[tec].values

@@ -258,7 +258,75 @@ def prorated_ceiling(remaining_budget, periods_left):
     return remaining_budget / periods_left
 
 
-def build_ceilings(day_index, day_to_month, remaining_lake, remaining_thermal, n_days_total):
+def weighted_ceiling(remaining_budget, weight_today, weight_sum_remaining):
+    """One committed day's value-weighted share of a remaining budget.
+
+    Same role as prorated_ceiling, but each remaining day's share is
+    proportional to a per-day weight (e.g. historical day-of-week hydro-use
+    intensity from load_hydro_weights) instead of a flat 1/periods_left
+    split. Falls back to "nothing left" (like prorated_ceiling) when the
+    remaining weight mass is non-positive.
+    """
+    if weight_sum_remaining <= 0:
+        return 0.0
+    return remaining_budget * weight_today / weight_sum_remaining
+
+
+def load_hydro_weights(path="scenarios/baseline/hydro_daily_weights.csv"):
+    """Load the historical day-of-week hydro weight table.
+
+    See build_hydro_daily_weights.py -- weights are derived ONLY from
+    calibration years (never the year being backtested), so using them
+    here does not leak the test year's own realized hydro dispatch, only
+    a seasonal day-of-week prior (weekday vs weekend demand-following
+    shape).
+
+    Returns {(area, month, day_of_week): weight}, or {} if the file
+    doesn't exist -- callers then fall back to flat proration.
+    """
+    from pathlib import Path
+
+    import pandas as pd
+
+    p = Path(path)
+    if not p.exists():
+        return {}
+    df = pd.read_csv(p)
+    return {
+        (row.area, int(row.month), int(row.day_of_week)): row.weight
+        for row in df.itertuples()
+    }
+
+
+def compute_day_to_date(days):
+    """Map each calendar day index to its actual Paris-local date.
+
+    Uses the day's first committed hour (POSIX hours, matching
+    hour_month.csv's convention) to recover the real calendar date, purely
+    so build_ceilings can look up each remaining day's day-of-week in
+    load_hydro_weights' table -- no other use.
+    """
+    import datetime
+    from zoneinfo import ZoneInfo
+
+    paris = ZoneInfo("Europe/Paris")
+    return [
+        datetime.datetime.fromtimestamp(day_hours[0] * 3600, tz=datetime.timezone.utc)
+        .astimezone(paris)
+        .date()
+        for day_hours in days
+    ]
+
+
+def build_ceilings(
+    day_index,
+    day_to_month,
+    remaining_lake,
+    remaining_thermal,
+    n_days_total,
+    hydro_weights=None,
+    day_to_date=None,
+):
     """Compute this window's prorated budget ceilings.
 
     Args:
@@ -267,6 +335,16 @@ def build_ceilings(day_index, day_to_month, remaining_lake, remaining_thermal, n
         remaining_lake: running {(area, month): GWh} budget tracker.
         remaining_thermal: running {(area, thr): GWh-equivalent} tracker.
         n_days_total: total days in the whole backtest.
+        hydro_weights: optional {(area, month, day_of_week): weight} table
+            from load_hydro_weights(). When given together with
+            day_to_date, the lake_phs ceiling is split across the
+            remaining days of the month in proportion to these weights
+            instead of flat 1/periods_left -- see
+            "Known limitation: hydro/thermal budget proration" in the
+            README. Missing (area, month, dow) cells default to weight 1
+            (i.e. that specific day falls back to the flat share).
+        day_to_date: optional list from compute_day_to_date(), day_index ->
+            actual Paris-local date. Required to use hydro_weights.
 
     Returns:
         (lake_ceiling, thermal_ceiling) dicts, ready to pass straight into
@@ -276,14 +354,39 @@ def build_ceilings(day_index, day_to_month, remaining_lake, remaining_thermal, n
         there.
     """
     month = day_to_month[day_index]
-    periods_left_lake = sum(1 for m in day_to_month[day_index:] if m == month)
+    remaining_days = [d for d in range(day_index, n_days_total) if day_to_month[d] == month]
+    periods_left_lake = len(remaining_days)
     periods_left_thermal = n_days_total - day_index
 
-    lake_ceiling = {
-        (a, m): prorated_ceiling(budget, periods_left_lake)
-        for (a, m), budget in remaining_lake.items()
-        if m == month
-    }
+    use_weights = bool(hydro_weights) and day_to_date is not None
+
+    if use_weights:
+        # day_to_month is YYYYMM (matches remaining_lake's (area, month) keys
+        # and lake_inflows.csv), but hydro_daily_weights.csv is keyed by
+        # plain calendar month (1-12, from build_hydro_daily_weights.py's
+        # .dt.month) -- always derive the weight-table month from the actual
+        # date rather than reusing the YYYYMM `month` value here.
+        cal_month_by_day = {d: day_to_date[d].month for d in remaining_days}
+        dow_by_day = {d: day_to_date[d].weekday() for d in remaining_days}
+        lake_ceiling = {}
+        for (a, m), budget in remaining_lake.items():
+            if m != month:
+                continue
+            weight_today = hydro_weights.get(
+                (a, cal_month_by_day[day_index], dow_by_day[day_index]), 1.0
+            )
+            weight_sum = sum(
+                hydro_weights.get((a, cal_month_by_day[d], dow_by_day[d]), 1.0)
+                for d in remaining_days
+            )
+            lake_ceiling[(a, m)] = weighted_ceiling(budget, weight_today, weight_sum)
+    else:
+        lake_ceiling = {
+            (a, m): prorated_ceiling(budget, periods_left_lake)
+            for (a, m), budget in remaining_lake.items()
+            if m == month
+        }
+
     thermal_ceiling = {
         key: prorated_ceiling(budget, periods_left_thermal)
         for key, budget in remaining_thermal.items()
@@ -301,6 +404,8 @@ def solve_window(
     n_days_total,
     hours_months,
     solver="highs",
+    hydro_weights=None,
+    day_to_date=None,
 ):
     """Build, solve, and extract results for one rolling window.
 
@@ -336,7 +441,13 @@ def solve_window(
 
     day_index = window["day_index"]
     lake_ceiling, thermal_ceiling = build_ceilings(
-        day_index, day_to_month, remaining_lake, remaining_thermal, n_days_total
+        day_index,
+        day_to_month,
+        remaining_lake,
+        remaining_thermal,
+        n_days_total,
+        hydro_weights=hydro_weights,
+        day_to_date=day_to_date,
     )
 
     initial_soc = state["initial_soc"] if state is not None else None
@@ -370,7 +481,13 @@ def solve_window(
     return model, extracted
 
 
-def run_rolling_backtest(run_dir, solver="highs", verbose=True, buffer_days=1):
+def run_rolling_backtest(
+    run_dir,
+    solver="highs",
+    verbose=True,
+    buffer_days=1,
+    hydro_weights_path="scenarios/baseline/hydro_daily_weights.csv",
+):
     """Run a full rolling-horizon backtest over an existing run's period.
 
     Requires the run to already exist (created via create_run, which builds
@@ -409,6 +526,17 @@ def run_rolling_backtest(run_dir, solver="highs", verbose=True, buffer_days=1):
     days = [w["committed_hours"] for w in windows]
     day_to_month = compute_day_to_month(days, hours_months)
     n_days_total = len(windows)
+    day_to_date = compute_day_to_date(days)
+
+    hydro_weights = load_hydro_weights(hydro_weights_path)
+    if verbose:
+        print(
+            f"[rolling] hydro_weights: {len(hydro_weights)} (area, month, dow) cells "
+            f"loaded from {hydro_weights_path}"
+            if hydro_weights
+            else f"[rolling] hydro_weights: none found at {hydro_weights_path} "
+            "-- falling back to flat proration"
+        )
 
     budget_inputs = load_budget_inputs(run_dir)
     remaining_lake, remaining_thermal = initial_budgets(budget_inputs, n_hours=len(hours))
@@ -438,6 +566,8 @@ def run_rolling_backtest(run_dir, solver="highs", verbose=True, buffer_days=1):
             n_days_total,
             hours_months,
             solver=solver,
+            hydro_weights=hydro_weights,
+            day_to_date=day_to_date,
         )
 
         # Decrement the running budgets by what this committed day actually used.
